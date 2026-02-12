@@ -9,6 +9,9 @@ class HolonsTest < Minitest::Test
     assert_equal "tcp", Holons::Transport.scheme("tcp://:9090")
     assert_equal "unix", Holons::Transport.scheme("unix:///tmp/x.sock")
     assert_equal "stdio", Holons::Transport.scheme("stdio://")
+    assert_equal "mem", Holons::Transport.scheme("mem://")
+    assert_equal "ws", Holons::Transport.scheme("ws://127.0.0.1:8080/grpc")
+    assert_equal "wss", Holons::Transport.scheme("wss://example.com:443/grpc")
   end
 
   def test_default_uri
@@ -16,9 +19,38 @@ class HolonsTest < Minitest::Test
   end
 
   def test_tcp_listen
-    srv = Holons::Transport.listen("tcp://127.0.0.1:0")
-    assert srv.local_address.ip_port > 0
-    srv.close
+    listener = Holons::Transport.listen("tcp://127.0.0.1:0")
+    assert_instance_of Holons::Transport::Listener::Tcp, listener
+    assert listener.socket.local_address.ip_port > 0
+    listener.socket.close
+  end
+
+  def test_parse_uri_wss_defaults
+    parsed = Holons::Transport.parse_uri("wss://example.com:8443")
+    assert_equal "wss", parsed.scheme
+    assert_equal "example.com", parsed.host
+    assert_equal 8443, parsed.port
+    assert_equal "/grpc", parsed.path
+    assert parsed.secure
+  end
+
+  def test_stdio_and_mem_variants
+    stdio = Holons::Transport.listen("stdio://")
+    mem = Holons::Transport.listen("mem://")
+
+    assert_instance_of Holons::Transport::Listener::Stdio, stdio
+    assert_instance_of Holons::Transport::Listener::Mem, mem
+    assert_equal "stdio://", stdio.address
+    assert_equal "mem://", mem.address
+  end
+
+  def test_ws_variant
+    ws = Holons::Transport.listen("ws://127.0.0.1:8080/holon")
+    assert_instance_of Holons::Transport::Listener::WS, ws
+    assert_equal "127.0.0.1", ws.host
+    assert_equal 8080, ws.port
+    assert_equal "/holon", ws.path
+    refute ws.secure
   end
 
   def test_unsupported_uri
