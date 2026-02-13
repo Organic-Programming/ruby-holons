@@ -44,6 +44,53 @@ class HolonsTest < Minitest::Test
     assert_equal "mem://", mem.address
   end
 
+  def test_runtime_tcp_roundtrip
+    listener = Holons::Transport.listen("tcp://127.0.0.1:0")
+    tcp = listener
+    accepted = nil
+
+    accept_thread = Thread.new do
+      accepted = Holons::Transport.accept(tcp)
+    end
+
+    client = TCPSocket.new("127.0.0.1", tcp.socket.local_address.ip_port)
+    accept_thread.join
+
+    client.write("ping")
+    payload = Holons::Transport.conn_read(accepted, 4)
+    assert_equal "ping", payload
+
+    Holons::Transport.close_connection(accepted)
+    client.close
+    tcp.socket.close
+  end
+
+  def test_runtime_stdio_single_accept
+    stdio = Holons::Transport.listen("stdio://")
+    conn = Holons::Transport.accept(stdio)
+    assert_equal "stdio", conn.scheme
+    Holons::Transport.close_connection(conn)
+    assert_raises(RuntimeError) { Holons::Transport.accept(stdio) }
+  end
+
+  def test_runtime_mem_roundtrip
+    mem = Holons::Transport.listen("mem://ruby-test")
+    client = Holons::Transport.mem_dial(mem)
+    server = Holons::Transport.accept(mem)
+
+    Holons::Transport.conn_write(client, "mem")
+    payload = Holons::Transport.conn_read(server, 3)
+    assert_equal "mem", payload
+
+    Holons::Transport.close_connection(server)
+    Holons::Transport.close_connection(client)
+  end
+
+  def test_ws_runtime_unsupported
+    ws = Holons::Transport.listen("ws://127.0.0.1:8080/grpc")
+    assert_raises(RuntimeError) { Holons::Transport.accept(ws) }
+  end
+
   def test_ws_variant
     ws = Holons::Transport.listen("ws://127.0.0.1:8080/holon")
     assert_instance_of Holons::Transport::Listener::WS, ws

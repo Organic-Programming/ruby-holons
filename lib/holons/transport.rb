@@ -11,10 +11,12 @@ module Holons
     module Listener
       Tcp = Struct.new(:socket)
       Unix = Struct.new(:socket, :path)
-      Stdio = Struct.new(:address)
-      Mem = Struct.new(:address)
+      Stdio = Struct.new(:address, :consumed)
+      Mem = Struct.new(:address, :server_io, :client_io, :server_consumed, :client_consumed)
       WS = Struct.new(:host, :port, :path, :secure, keyword_init: true)
     end
+
+    Connection = Struct.new(:reader, :writer, :scheme, :owns_reader, :owns_writer)
 
     # Extract scheme from a transport URI.
     def self.scheme(uri)
@@ -42,8 +44,9 @@ module Holons
       when "stdio"
         ParsedURI.new(raw: "stdio://", scheme: "stdio", host: nil, port: nil, path: nil, secure: false)
       when "mem"
-        ParsedURI.new(raw: uri.start_with?("mem://") ? uri : "mem://", scheme: "mem", host: nil, port: nil, path: nil,
-                      secure: false)
+        raw = uri.start_with?("mem://") ? uri : "mem://"
+        name = raw.delete_prefix("mem://")
+        ParsedURI.new(raw: raw, scheme: "mem", host: nil, port: nil, path: name, secure: false)
       when "ws", "wss"
         secure = s == "wss"
         prefix = secure ? "wss://" : "ws://"
@@ -69,9 +72,10 @@ module Holons
       when "unix"
         Listener::Unix.new(listen_unix(parsed.path), parsed.path)
       when "stdio"
-        Listener::Stdio.new("stdio://")
+        Listener::Stdio.new("stdio://", false)
       when "mem"
-        Listener::Mem.new("mem://")
+        server_io, client_io = Socket.pair(:UNIX, :STREAM, 0)
+        Listener::Mem.new(parsed.raw || "mem://", server_io, client_io, false, false)
       when "ws", "wss"
         Listener::WS.new(
           host: parsed.host || "0.0.0.0",
@@ -81,6 +85,73 @@ module Holons
         )
       else
         raise ArgumentError, "unsupported transport URI: #{uri}"
+      end
+    end
+
+    # Accept one runtime connection from a listener.
+    def self.accept(listener)
+      case listener
+      when Listener::Tcp
+        socket = listener.socket.accept
+        Connection.new(socket, socket, "tcp", true, true)
+      when Listener::Unix
+        socket = listener.socket.accept
+        Connection.new(socket, socket, "unix", true, true)
+      when Listener::Stdio
+        raise RuntimeError, "stdio:// accepts exactly one connection" if listener.consumed
+
+        listener.consumed = true
+        Connection.new($stdin, $stdout, "stdio", false, false)
+      when Listener::Mem
+        raise RuntimeError, "mem:// server side already consumed" if listener.server_consumed || listener.server_io.nil?
+
+        io = listener.server_io
+        listener.server_io = nil
+        listener.server_consumed = true
+        Connection.new(io, io, "mem", true, true)
+      when Listener::WS
+        raise RuntimeError, "ws/wss runtime accept is unsupported (metadata-only listener)"
+      else
+        raise RuntimeError, "unsupported listener type"
+      end
+    end
+
+    # Dial the client side of a mem:// listener.
+    def self.mem_dial(listener)
+      unless listener.is_a?(Listener::Mem)
+        raise ArgumentError, "mem_dial requires a mem:// listener"
+      end
+
+      if listener.client_consumed || listener.client_io.nil?
+        raise RuntimeError, "mem:// client side already consumed"
+      end
+
+      io = listener.client_io
+      listener.client_io = nil
+      listener.client_consumed = true
+      Connection.new(io, io, "mem", true, true)
+    end
+
+    def self.conn_read(connection, max_bytes = 4096)
+      connection.reader.readpartial(max_bytes)
+    rescue EOFError
+      ""
+    end
+
+    def self.conn_write(connection, data)
+      payload = data.is_a?(String) ? data : data.to_s
+      connection.writer.write(payload)
+      connection.writer.flush if connection.writer.respond_to?(:flush)
+      payload.bytesize
+    end
+
+    def self.close_connection(connection)
+      if connection.owns_reader && connection.reader.respond_to?(:close) && !connection.reader.closed?
+        connection.reader.close
+      end
+      if connection.owns_writer && connection.writer != connection.reader &&
+         connection.writer.respond_to?(:close) && !connection.writer.closed?
+        connection.writer.close
       end
     end
 
