@@ -24,9 +24,9 @@
     ]
   },
   "last_certified": {
-    "commit": "02c2d658ac411e0cd57a253f8950daaeb2f7db51",
-    "date": "2026-02-14",
-    "level": 2
+    "commit": "",
+    "date": "",
+    "level": 0
   },
   "role": "client"
 }
