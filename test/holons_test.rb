@@ -173,9 +173,17 @@ class CertificationArtifactsTest < Minitest::Test
 
     assert_equal "./bin/echo-server", cert.dig("executables", "echo_server")
     assert_equal "./bin/echo-client", cert.dig("executables", "echo_client")
-    assert_equal true, cert.dig("capabilities", "grpc_dial_tcp")
-    assert_equal true, cert.dig("capabilities", "grpc_dial_stdio")
-    assert_equal true, cert.dig("capabilities", "grpc_dial_unix")
+
+    expected_level1_dial = {
+      "grpc_dial_tcp" => true,
+      "grpc_dial_stdio" => true,
+      "grpc_dial_unix" => true
+    }
+    actual_level1_dial = expected_level1_dial.keys.each_with_object({}) do |capability, result|
+      result[capability] = cert.dig("capabilities", capability)
+    end
+
+    assert_equal expected_level1_dial, actual_level1_dial
   end
 
   def test_echo_scripts_exist_and_are_executable
