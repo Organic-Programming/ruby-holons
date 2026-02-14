@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
+require "json"
 require "minitest/autorun"
 require "open3"
 require "securerandom"
 require "tempfile"
+require "tmpdir"
 require "timeout"
 require_relative "../lib/holons"
 
@@ -22,10 +24,16 @@ class HolonsTest < Minitest::Test
   end
 
   def test_tcp_listen
-    listener = Holons::Transport.listen("tcp://127.0.0.1:0")
-    assert_instance_of Holons::Transport::Listener::Tcp, listener
-    assert listener.socket.local_address.ip_port > 0
-    listener.socket.close
+    listener = nil
+    begin
+      listener = Holons::Transport.listen("tcp://127.0.0.1:0")
+      assert_instance_of Holons::Transport::Listener::Tcp, listener
+      assert listener.socket.local_address.ip_port > 0
+    rescue Errno::EPERM => e
+      skip_bind_denied(e)
+    ensure
+      listener&.socket&.close unless listener.nil? || listener.socket.closed?
+    end
   end
 
   def test_parse_uri_wss_defaults
@@ -48,24 +56,32 @@ class HolonsTest < Minitest::Test
   end
 
   def test_runtime_tcp_roundtrip
-    listener = Holons::Transport.listen("tcp://127.0.0.1:0")
-    tcp = listener
+    listener = nil
     accepted = nil
+    client = nil
+    accept_thread = nil
+    begin
+      listener = Holons::Transport.listen("tcp://127.0.0.1:0")
+      tcp = listener
 
-    accept_thread = Thread.new do
-      accepted = Holons::Transport.accept(tcp)
+      accept_thread = Thread.new do
+        accepted = Holons::Transport.accept(tcp)
+      end
+
+      client = TCPSocket.new("127.0.0.1", tcp.socket.local_address.ip_port)
+      accept_thread.join
+
+      client.write("ping")
+      payload = Holons::Transport.conn_read(accepted, 4)
+      assert_equal "ping", payload
+    rescue Errno::EPERM => e
+      skip_bind_denied(e)
+    ensure
+      Holons::Transport.close_connection(accepted) unless accepted.nil?
+      client.close unless client.nil? || client.closed?
+      listener&.socket&.close unless listener.nil? || listener.socket.closed?
+      accept_thread&.kill if accept_thread&.alive?
     end
-
-    client = TCPSocket.new("127.0.0.1", tcp.socket.local_address.ip_port)
-    accept_thread.join
-
-    client.write("ping")
-    payload = Holons::Transport.conn_read(accepted, 4)
-    assert_equal "ping", payload
-
-    Holons::Transport.close_connection(accepted)
-    client.close
-    tcp.socket.close
   end
 
   def test_runtime_stdio_single_accept
@@ -142,6 +158,94 @@ class HolonsTest < Minitest::Test
     tmp.flush
     assert_raises(RuntimeError) { Holons::Identity.parse_holon(tmp.path) }
     tmp.close!
+  end
+
+  private
+
+  def skip_bind_denied(error)
+    skip "local socket bind is denied in this environment: #{error.message}"
+  end
+end
+
+class CertificationArtifactsTest < Minitest::Test
+  def test_cert_json_declares_echo_executables_and_level1_dial
+    cert = JSON.parse(File.read(File.join(sdk_dir, "cert.json")))
+
+    assert_equal "./bin/echo-server", cert.dig("executables", "echo_server")
+    assert_equal "./bin/echo-client", cert.dig("executables", "echo_client")
+    assert_equal true, cert.dig("capabilities", "grpc_dial_tcp")
+    assert_equal true, cert.dig("capabilities", "grpc_dial_stdio")
+    assert_equal true, cert.dig("capabilities", "grpc_dial_unix")
+  end
+
+  def test_echo_scripts_exist_and_are_executable
+    echo_client = File.join(sdk_dir, "bin", "echo-client")
+    echo_server = File.join(sdk_dir, "bin", "echo-server")
+
+    assert File.file?(echo_client), "missing #{echo_client}"
+    assert File.file?(echo_server), "missing #{echo_server}"
+    assert File.executable?(echo_client), "echo-client is not executable"
+    assert File.executable?(echo_server), "echo-server is not executable"
+  end
+
+  def test_echo_client_script_passes_expected_arguments_to_go
+    script = File.join(sdk_dir, "bin", "echo-client")
+    args = capture_forwarded_args(script, "--message", "ruby-cert", "stdio://")
+
+    assert_equal "run", args[0]
+    assert args.any? { |arg| arg.include?("js-web-holons/cmd/echo-client-go/main.go") },
+      "unexpected helper path arguments: #{args.inspect}"
+    assert_flag_value(args, "--sdk", "ruby-holons")
+    assert_flag_value(args, "--server-sdk", "go-holons")
+    assert_flag_value(args, "--message", "ruby-cert")
+    assert_equal "stdio://", args[-1]
+  end
+
+  def test_echo_server_script_passes_expected_arguments_to_go
+    script = File.join(sdk_dir, "bin", "echo-server")
+    args = capture_forwarded_args(script, "--listen", "stdio://")
+
+    assert_equal "run", args[0]
+    assert_equal "./cmd/echo-server", args[1]
+    assert_flag_value(args, "--sdk", "ruby-holons")
+    assert_flag_value(args, "--listen", "stdio://")
+  end
+
+  private
+
+  def sdk_dir
+    File.expand_path("..", __dir__)
+  end
+
+  def capture_forwarded_args(script, *script_args)
+    Dir.mktmpdir("ruby-holons-fake-go") do |dir|
+      args_file = File.join(dir, "args.txt")
+      fake_go = File.join(dir, "go")
+
+      File.write(fake_go, <<~SH)
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '%s\n' "$@" > "${FAKE_GO_ARGS_PATH}"
+      SH
+      File.chmod(0o755, fake_go)
+
+      env = {
+        "GO_BIN" => fake_go,
+        "FAKE_GO_ARGS_PATH" => args_file,
+        "GOCACHE" => "/tmp/go-cache-ruby-holons-tests"
+      }
+      _stdout, stderr, status =
+        Open3.capture3(env, script, *script_args, chdir: sdk_dir)
+
+      assert status.success?, "script failed with stderr: #{stderr}"
+      File.readlines(args_file, chomp: true)
+    end
+  end
+
+  def assert_flag_value(args, flag, expected)
+    idx = args.index(flag)
+    refute_nil idx, "missing flag #{flag} in #{args.inspect}"
+    assert_equal expected, args[idx + 1]
   end
 end
 
@@ -229,15 +333,24 @@ class HolonRPCTest < Minitest::Test
     File.write(helper, File.read(fixture))
 
     go_bin = resolve_go_binary
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
     stdin, stdout, stderr, wait_thr =
-      Open3.popen3(go_bin, "run", helper, mode, chdir: go_dir)
+      Open3.popen3(env, go_bin, "run", helper, mode, chdir: go_dir)
 
     begin
       url = nil
       Timeout.timeout(20) do
         url = stdout.gets&.strip
       end
-      raise "Go helper did not output URL: #{stderr.read}" if url.nil? || url.empty?
+      if url.nil? || url.empty?
+        error_output = stderr.read
+        if bind_denied?(error_output)
+          skip "Go helper requires local bind permissions in this environment"
+        end
+        raise "Go helper did not output URL: #{error_output}"
+      end
 
       yield(url)
     ensure
@@ -279,5 +392,11 @@ class HolonRPCTest < Minitest::Test
   def resolve_go_binary
     preferred = "/Users/bpds/go/go1.25.1/bin/go"
     File.executable?(preferred) ? preferred : "go"
+  end
+
+  def bind_denied?(text)
+    normalized = text.to_s.downcase
+    normalized.include?("bind: operation not permitted") ||
+      normalized.include?("operation not permitted - bind")
   end
 end
