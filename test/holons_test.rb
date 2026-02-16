@@ -173,27 +173,33 @@ class CertificationArtifactsTest < Minitest::Test
 
     assert_equal "./bin/echo-server", cert.dig("executables", "echo_server")
     assert_equal "./bin/echo-client", cert.dig("executables", "echo_client")
+    assert_equal "./bin/holon-rpc-server", cert.dig("executables", "holon_rpc_server")
 
-    expected_level1_dial = {
+    expected_capabilities = {
       "grpc_dial_tcp" => true,
       "grpc_dial_stdio" => true,
-      "grpc_dial_unix" => true
+      "grpc_dial_unix" => true,
+      "grpc_dial_ws" => true,
+      "holon_rpc_server" => true
     }
-    actual_level1_dial = expected_level1_dial.keys.each_with_object({}) do |capability, result|
+    actual_capabilities = expected_capabilities.keys.each_with_object({}) do |capability, result|
       result[capability] = cert.dig("capabilities", capability)
     end
 
-    assert_equal expected_level1_dial, actual_level1_dial
+    assert_equal expected_capabilities, actual_capabilities
   end
 
   def test_echo_scripts_exist_and_are_executable
     echo_client = File.join(sdk_dir, "bin", "echo-client")
     echo_server = File.join(sdk_dir, "bin", "echo-server")
+    holon_rpc_server = File.join(sdk_dir, "bin", "holon-rpc-server")
 
     assert File.file?(echo_client), "missing #{echo_client}"
     assert File.file?(echo_server), "missing #{echo_server}"
+    assert File.file?(holon_rpc_server), "missing #{holon_rpc_server}"
     assert File.executable?(echo_client), "echo-client is not executable"
     assert File.executable?(echo_server), "echo-server is not executable"
+    assert File.executable?(holon_rpc_server), "holon-rpc-server is not executable"
   end
 
   def test_echo_client_script_passes_expected_arguments_to_go
@@ -201,7 +207,7 @@ class CertificationArtifactsTest < Minitest::Test
     args = capture_forwarded_args(script, "--message", "ruby-cert", "stdio://")
 
     assert_equal "run", args[0]
-    assert args.any? { |arg| arg.include?("js-web-holons/cmd/echo-client-go/main.go") },
+    assert args.any? { |arg| arg.include?("kotlin-holons/cmd/echo-client-go/main.go") },
       "unexpected helper path arguments: #{args.inspect}"
     assert_flag_value(args, "--sdk", "ruby-holons")
     assert_flag_value(args, "--server-sdk", "go-holons")
@@ -217,6 +223,36 @@ class CertificationArtifactsTest < Minitest::Test
     assert_equal "./cmd/echo-server", args[1]
     assert_flag_value(args, "--sdk", "ruby-holons")
     assert_flag_value(args, "--listen", "stdio://")
+  end
+
+  def test_holon_rpc_server_script_passes_expected_arguments_to_go
+    script = File.join(sdk_dir, "bin", "holon-rpc-server")
+    args = capture_forwarded_args(script, "ws://127.0.0.1:0/rpc")
+
+    assert_equal "run", args[0]
+    assert args.any? { |arg| arg.include?("kotlin-holons/cmd/holon-rpc-server-go/main.go") },
+      "unexpected helper path arguments: #{args.inspect}"
+    assert_flag_value(args, "--sdk", "ruby-holons")
+    assert_equal "ws://127.0.0.1:0/rpc", args[-1]
+  end
+
+  def test_echo_client_can_dial_go_ws_server
+    with_go_echo_server("ws://127.0.0.1:0/grpc") do |uri|
+      stdout, stderr, status = Open3.capture3(
+        { "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests") },
+        File.join(sdk_dir, "bin", "echo-client"),
+        "--message",
+        "ws-cert",
+        uri,
+        chdir: sdk_dir
+      )
+
+      assert status.success?, "ws dial failed with stderr: #{stderr}"
+
+      result = JSON.parse(stdout)
+      assert_equal "pass", result["status"]
+      assert_equal "go-holons", result["response_sdk"]
+    end
   end
 
   private
@@ -254,6 +290,70 @@ class CertificationArtifactsTest < Minitest::Test
     idx = args.index(flag)
     refute_nil idx, "missing flag #{flag} in #{args.inspect}"
     assert_equal expected, args[idx + 1]
+  end
+
+  def with_go_echo_server(listen_uri)
+    sdk_root = File.expand_path("../..", __dir__)
+    go_dir = File.join(sdk_root, "go-holons")
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
+    stdin, stdout, stderr, wait_thr = Open3.popen3(
+      env,
+      resolve_go_binary,
+      "run",
+      "./cmd/echo-server",
+      "--listen",
+      listen_uri,
+      "--sdk",
+      "go-holons",
+      chdir: go_dir
+    )
+
+    begin
+      uri = nil
+      Timeout.timeout(20) do
+        uri = stdout.gets&.strip
+      end
+      if uri.nil? || uri.empty?
+        error_output = stderr.read
+        if bind_denied?(error_output)
+          skip "Go echo-server requires local bind permissions in this environment"
+        end
+        raise "Go echo-server did not output URL: #{error_output}"
+      end
+
+      yield(uri)
+    ensure
+      stdin.close unless stdin.closed?
+      begin
+        Process.kill("TERM", wait_thr.pid)
+      rescue StandardError
+        nil
+      end
+      begin
+        Timeout.timeout(5) { wait_thr.value }
+      rescue StandardError
+        begin
+          Process.kill("KILL", wait_thr.pid)
+        rescue StandardError
+          nil
+        end
+      end
+      stdout.close unless stdout.closed?
+      stderr.close unless stderr.closed?
+    end
+  end
+
+  def resolve_go_binary
+    preferred = "/Users/bpds/go/go1.25.1/bin/go"
+    File.executable?(preferred) ? preferred : "go"
+  end
+
+  def bind_denied?(text)
+    normalized = text.to_s.downcase
+    normalized.include?("bind: operation not permitted") ||
+      normalized.include?("operation not permitted - bind")
   end
 end
 
@@ -315,6 +415,49 @@ class HolonRPCTest < Minitest::Test
       hb = invoke_eventually(client, "echo.v1.Echo/HeartbeatCount", {})
       assert hb["count"].to_i >= 1
       client.close
+    end
+  end
+
+  def test_ruby_holon_rpc_server_echo_roundtrip
+    with_ruby_holon_rpc_server("ws://127.0.0.1:0/rpc") do |url|
+      client = Holons::HolonRPCClient.new(
+        heartbeat_interval_ms: 250,
+        heartbeat_timeout_ms: 250,
+        reconnect_min_delay_ms: 100,
+        reconnect_max_delay_ms: 400
+      )
+
+      begin
+        client.connect(url)
+        out = client.invoke("echo.v1.Echo/Ping", { "message" => "ruby-server" })
+        assert_equal "ruby-server", out["message"]
+        assert_equal "ruby-holons", out["sdk"]
+      ensure
+        client.close
+      end
+    end
+  end
+
+  def test_ruby_holon_rpc_server_bidirectional_call
+    with_ruby_holon_rpc_server("ws://127.0.0.1:0/rpc") do |url|
+      client = Holons::HolonRPCClient.new(
+        heartbeat_interval_ms: 250,
+        heartbeat_timeout_ms: 250,
+        reconnect_min_delay_ms: 100,
+        reconnect_max_delay_ms: 400
+      )
+
+      client.register("client.v1.Client/Hello") do |params|
+        { "message" => "hello #{params["name"] || ""}" }
+      end
+
+      begin
+        client.connect(url)
+        out = invoke_eventually(client, "echo.v1.Echo/CallClient", { "name" => "ruby" })
+        assert_equal "hello ruby", out["message"]
+      ensure
+        client.close
+      end
     end
   end
 
@@ -380,6 +523,50 @@ class HolonRPCTest < Minitest::Test
       stdout.close unless stdout.closed?
       stderr.close unless stderr.closed?
       File.delete(helper) if File.exist?(helper)
+    end
+  end
+
+  def with_ruby_holon_rpc_server(*args)
+    sdk_dir = File.expand_path("..", __dir__)
+    script = File.join(sdk_dir, "bin", "holon-rpc-server")
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
+    stdin, stdout, stderr, wait_thr =
+      Open3.popen3(env, script, *args, chdir: sdk_dir)
+
+    begin
+      url = nil
+      Timeout.timeout(20) do
+        url = stdout.gets&.strip
+      end
+      if url.nil? || url.empty?
+        error_output = stderr.read
+        if bind_denied?(error_output)
+          skip "ruby holon-rpc server requires local bind permissions in this environment"
+        end
+        raise "ruby holon-rpc server did not output URL: #{error_output}"
+      end
+
+      yield(url)
+    ensure
+      stdin.close unless stdin.closed?
+      begin
+        Process.kill("TERM", wait_thr.pid)
+      rescue StandardError
+        nil
+      end
+      begin
+        Timeout.timeout(5) { wait_thr.value }
+      rescue StandardError
+        begin
+          Process.kill("KILL", wait_thr.pid)
+        rescue StandardError
+          nil
+        end
+      end
+      stdout.close unless stdout.closed?
+      stderr.close unless stderr.closed?
     end
   end
 

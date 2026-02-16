@@ -4,13 +4,13 @@
     "grpc_dial_stdio": true,
     "grpc_dial_tcp": true,
     "grpc_dial_unix": true,
-    "grpc_dial_ws": false,
+    "grpc_dial_ws": true,
     "grpc_listen_mem": true,
     "grpc_listen_stdio": true,
     "grpc_listen_tcp": true,
     "grpc_listen_unix": true,
     "holon_rpc_client": true,
-    "holon_rpc_server": false,
+    "holon_rpc_server": true,
     "routing": [
       "unicast"
     ],
@@ -18,11 +18,12 @@
   },
   "executables": {
     "echo_client": "./bin/echo-client",
-    "echo_server": "./bin/echo-server"
+    "echo_server": "./bin/echo-server",
+    "holon_rpc_server": "./bin/holon-rpc-server"
   },
   "lang": "ruby",
   "last_certified": {
-    "commit": "d823c30ebac07635c8db2116883f441c004bab14",
+    "commit": "c303bc96a104c173dd366228fd4be821dd05b535",
     "date": "2026-02-16",
     "level": 2
   },
