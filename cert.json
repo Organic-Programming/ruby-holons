@@ -23,9 +23,9 @@
   },
   "lang": "ruby",
   "last_certified": {
-    "commit": "c8d02e22faf179fa68e3a8ecbcd6d81a656f2046",
+    "commit": "40eaebcd61c5c0dc7e72bfeabf635e8b720ac927",
     "date": "2026-02-16",
-    "level": 4
+    "level": 5
   },
   "role": "client",
   "sdk": "ruby-holons",

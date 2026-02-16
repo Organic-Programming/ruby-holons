@@ -220,8 +220,18 @@ class CertificationArtifactsTest < Minitest::Test
     args = capture_forwarded_args(script, "--listen", "stdio://")
 
     assert_equal "run", args[0]
-    assert_equal "./cmd/echo-server", args[1]
+    assert args.any? { |arg| arg.include?("ruby-holons/cmd/echo-server-go/main.go") },
+      "unexpected helper path arguments: #{args.inspect}"
     assert_flag_value(args, "--sdk", "ruby-holons")
+    assert_flag_value(args, "--listen", "stdio://")
+  end
+
+  def test_echo_server_script_forwards_sleep_ms
+    script = File.join(sdk_dir, "bin", "echo-server")
+    args = capture_forwarded_args(script, "--sleep-ms", "250", "--listen", "stdio://")
+
+    assert_equal "run", args[0]
+    assert_flag_value(args, "--sleep-ms", "250")
     assert_flag_value(args, "--listen", "stdio://")
   end
 
@@ -265,10 +275,59 @@ class CertificationArtifactsTest < Minitest::Test
     end
   end
 
+  def test_echo_server_timeout_propagates_deadline_and_stays_healthy
+    with_ruby_echo_server("--sleep-ms", "5000", "--listen", "tcp://127.0.0.1:0") do |uri|
+      _timeout_out, timeout_err, timeout_status = run_go_echo_client(
+        "--server-sdk",
+        "ruby-holons",
+        "--timeout-ms",
+        "2000",
+        "--message",
+        "cert-l5-timeout",
+        uri
+      )
+      refute timeout_status.success?, "expected timeout probe to fail"
+      assert_match(/DeadlineExceeded|deadline exceeded/, timeout_err)
+
+      follow_out, follow_err, follow_status = run_go_echo_client(
+        "--server-sdk",
+        "ruby-holons",
+        "--timeout-ms",
+        "8000",
+        "--message",
+        "cert-l5-timeout-followup",
+        uri
+      )
+      assert follow_status.success?, "follow-up probe failed with stderr: #{follow_err}"
+
+      follow_json = JSON.parse(follow_out)
+      assert_equal "pass", follow_json["status"]
+      assert_equal "ruby-holons", follow_json["response_sdk"]
+    end
+  end
+
+  def test_echo_server_rejects_oversized_messages_and_stays_healthy
+    with_ruby_echo_server("--listen", "tcp://127.0.0.1:0") do |uri|
+      stdout, stderr, status = run_go_large_ping_probe(uri)
+      assert status.success?, "oversized probe failed with stderr: #{stderr}"
+      assert_match(/RESULT=RESOURCE_EXHAUSTED/, stdout)
+      assert_match(/SMALL_OK/, stdout)
+      assert_match(/SDK=ruby-holons/, stdout)
+    end
+  end
+
   private
 
   def sdk_dir
     File.expand_path("..", __dir__)
+  end
+
+  def sdk_root
+    File.expand_path("../..", __dir__)
+  end
+
+  def go_holons_dir
+    File.join(sdk_root, "go-holons")
   end
 
   def capture_forwarded_args(script, *script_args)
@@ -303,8 +362,6 @@ class CertificationArtifactsTest < Minitest::Test
   end
 
   def with_go_echo_server(listen_uri)
-    sdk_root = File.expand_path("../..", __dir__)
-    go_dir = File.join(sdk_root, "go-holons")
     env = {
       "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
     }
@@ -317,7 +374,7 @@ class CertificationArtifactsTest < Minitest::Test
       listen_uri,
       "--sdk",
       "go-holons",
-      chdir: go_dir
+      chdir: go_holons_dir
     )
 
     begin
@@ -353,6 +410,87 @@ class CertificationArtifactsTest < Minitest::Test
       stdout.close unless stdout.closed?
       stderr.close unless stderr.closed?
     end
+  end
+
+  def with_ruby_echo_server(*args)
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
+    script = File.join(sdk_dir, "bin", "echo-server")
+    stdin, stdout, stderr, wait_thr = Open3.popen3(
+      env,
+      script,
+      *args,
+      chdir: sdk_dir
+    )
+
+    begin
+      uri = nil
+      Timeout.timeout(20) do
+        uri = stdout.gets&.strip
+      end
+      if uri.nil? || uri.empty?
+        error_output = stderr.read
+        if bind_denied?(error_output)
+          skip "ruby echo-server requires local bind permissions in this environment"
+        end
+        raise "ruby echo-server did not output URL: #{error_output}"
+      end
+
+      yield(uri)
+    ensure
+      stdin.close unless stdin.closed?
+      begin
+        Process.kill("TERM", wait_thr.pid)
+      rescue StandardError
+        nil
+      end
+      begin
+        Timeout.timeout(5) { wait_thr.value }
+      rescue StandardError
+        begin
+          Process.kill("KILL", wait_thr.pid)
+        rescue StandardError
+          nil
+        end
+      end
+      stdout.close unless stdout.closed?
+      stderr.close unless stderr.closed?
+    end
+  end
+
+  def run_go_echo_client(*args)
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
+    Open3.capture3(
+      env,
+      resolve_go_binary,
+      "run",
+      "./cmd/echo-client",
+      *args,
+      chdir: go_holons_dir
+    )
+  end
+
+  def run_go_large_ping_probe(uri)
+    fixture = File.join(__dir__, "fixtures", "go_large_ping.go")
+    helper = File.join(go_holons_dir, "tmp-ruby-large-ping-#{SecureRandom.uuid}.go")
+    File.write(helper, File.read(fixture))
+    env = {
+      "GOCACHE" => ENV.fetch("GOCACHE", "/tmp/go-cache-ruby-holons-tests")
+    }
+
+    Open3.capture3(
+      env,
+      resolve_go_binary,
+      "run",
+      helper,
+      uri,
+      chdir: go_holons_dir
+    )
+  ensure
+    File.delete(helper) if helper && File.exist?(helper)
   end
 
   def resolve_go_binary
