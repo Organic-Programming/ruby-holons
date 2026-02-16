@@ -236,6 +236,16 @@ class CertificationArtifactsTest < Minitest::Test
     assert_equal "ws://127.0.0.1:0/rpc", args[-1]
   end
 
+  def test_holon_rpc_server_script_accepts_uri_before_flags
+    script = File.join(sdk_dir, "bin", "holon-rpc-server")
+    args = capture_forwarded_args(script, "ws://127.0.0.1:0/rpc", "--once")
+
+    assert_equal "run", args[0]
+    assert_flag_value(args, "--sdk", "ruby-holons")
+    assert_includes args, "--once"
+    assert_equal "ws://127.0.0.1:0/rpc", args[-1]
+  end
+
   def test_echo_client_can_dial_go_ws_server
     with_go_echo_server("ws://127.0.0.1:0/grpc") do |uri|
       stdout, stderr, status = Open3.capture3(
