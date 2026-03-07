@@ -1,7 +1,8 @@
 # ruby-holons
 
-**Ruby SDK for Organic Programming** — transport, serve, identity,
-and Holon-RPC client utilities for building holons in Ruby.
+**Ruby SDK for Organic Programming** — transport primitives,
+serve-flag parsing, identity parsing, discovery, and a Holon-RPC
+client.
 
 ## Test
 
@@ -16,34 +17,17 @@ ruby test/holons_test.rb
 | `Holons::Transport` | `parse_uri(uri)`, `listen(uri)`, `accept(listener)`, `mem_dial(listener)`, `conn_read(conn)`, `conn_write(conn)`, `close_connection(conn)`, `scheme(uri)` |
 | `Holons::Serve` | `parse_flags(args)` |
 | `Holons::Identity` | `parse_holon(path)` |
+| `Holons::Discover` | `discover(root)`, `discover_local`, `discover_all`, `find_by_slug(slug)`, `find_by_uuid(prefix)` |
 | `Holons::HolonRPCClient` | `connect(url)`, `invoke(method, params)`, `register(method, &handler)`, `close` |
 
-## Transport support
+## Current scope
 
-| Scheme | Support |
-|--------|---------|
-| `tcp://<host>:<port>` | Bound socket (`Listener::Tcp`) |
-| `unix://<path>` | Bound UNIX socket (`Listener::Unix`) |
-| `stdio://` | Native runtime accept (single-connection semantics) |
-| `mem://` | Native runtime in-process pair (`mem_dial` + `accept`) |
-| `ws://<host>:<port>` | Listener metadata (`Listener::WS`) |
-| `wss://<host>:<port>` | Listener metadata (`Listener::WS`) |
+- Runtime transports: `tcp://`, `unix://`, `stdio://`, `mem://`
+- `ws://` and `wss://` are metadata-only at the transport layer
+- Discovery scans local, `$OPBIN`, and cache roots
 
-## Parity Notes vs Go Reference
+## Current gaps vs Go
 
-Implemented parity:
-
-- URI parsing and listener dispatch semantics
-- Runtime accept path for `tcp`, `unix`, `stdio`, and `mem`
-- In-process `mem://` transport with explicit client/server endpoints
-- Holon-RPC client protocol support over `ws://` / `wss://` (JSON-RPC 2.0, heartbeat, reconnect)
-- Standard serve flag parsing
-- HOLON identity parsing
-
-Not yet achievable in this minimal Ruby core (justified gaps):
-
-- `ws://` / `wss://` runtime listener parity:
-  - Exposed as metadata only.
-  - Full Go-style WebSocket listener parity requires additional HTTP/WebSocket gRPC runtime integration not included here.
-- Full gRPC transport parity (`Dial("tcp://...")`, `Dial("stdio://...")`, `Listen("stdio://...")`, and `Serve.Run()` wiring):
-  - Not yet provided; requires a dedicated Ruby gRPC adapter layer and stdio transport integration.
+- No generic slug-based `connect()` helper yet.
+- No full gRPC `serve` lifecycle helper yet.
+- No Holon-RPC server module yet.
