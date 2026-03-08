@@ -4,6 +4,7 @@ require_relative "holons/transport"
 require_relative "holons/serve"
 require_relative "holons/identity"
 require_relative "holons/discover"
+require_relative "holons/connect"
 require_relative "holons/holonrpc"
 
 module Holons

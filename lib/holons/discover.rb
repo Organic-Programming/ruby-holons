@@ -56,6 +56,10 @@ module Holons
       match
     end
 
+    def discover_by_slug(slug)
+      find_by_slug(slug)
+    end
+
     def find_by_uuid(prefix)
       needle = prefix.to_s.strip
       return nil if needle.empty?
